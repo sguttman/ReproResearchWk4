@@ -1,0 +1,155 @@
+---
+title: "Basic analysis of severe weather events using the NOAA Storm Database"
+author: "Steve Guttman"
+date: "June 20, 2016"
+output: 
+     html_document:
+          theme: readable
+---
+##Synopsis
+An analysis of health effects (fatalities and injuries) and economic damage (property and crop) was undertaken for a variety of events using the NOAA Storm database. These events occurred across the US during the time period Sept 9, 1985 - Sept 9, 2011. A major set of assumptions within this analysis involved the remapping of events from the raw data file to the standard events described in the database documentation. Top 10 worst events for health effects (tornados #1) and economic damage (floods #1) were reported. A brief analysis of the relationship between health effects and economic damage was explored, which suggest they are correlated for some types of events.
+
+```{r, setoptions, echo=FALSE}
+## Set global knitr options
+     options(warn=-1)
+```
+## Data Processing
+#### Load dependent libraries
+The analysis uses a number of r packages as listed below  
+  
+```{r}
+## Load dependent libraries
+     suppressMessages(library(dplyr))
+     suppressMessages(library(tidyr))
+     suppressMessages(library(scales))
+     library(ggplot2)
+```
+  
+#### Loading and Processing the raw data
+Data data for this analysis comes from the  U.S. National Oceanic and Atmospheric Administration's [(NOAA) storm database](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2). This database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+Database documentation can be found:  
+- National Weather Service [Storm Data Documentation](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf)  
+- National Climatic Data Center Storm Events [FAQ](https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf)  
+
+The data is available as a comma-separated-value bzip2 file. We first check to see if the zip file exists locally. If not, it is downloaded. 
+```{r, cache=TRUE}
+## Download the relevant data set if it doesn't exist already
+     if( !file.exists("repdata%2Fdata%2FStormData.csv.bz2")) {
+          fileUrl <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+          download.file( fileUrl, destfile = "repdata%2Fdata%2FStormData.csv.bz2")
+          dateDownloaded <- date()
+     }
+## Extract activity set from the zip file and print head
+     stormData <- read.csv("repdata%2Fdata%2FStormData.csv.bz2")
+
+```
+After reading in the file data we check the first few rows (there are `r nrow(stormData)`) rows in this dataset.
+```{r}
+dim(stormData)
+```
+  
+```{r}
+head(stormData[,c(1,3:8)])
+```
+#### Remapping Storm Data Events
+An inspection of the storm events suggests that they don't map 1-to-1 to the storm data events table as described in the NWSI 10-1605 document linked-to above. That document described 48 categories of storm data events. The *stormData* data frame identifies approximately 985 unique EVTYPES. Thus, the EVTYPES will need to be mapped to the 48 storm data events described in the document.  
+  
+In order to accomplish this, we will first scrub the *stormData* file of irrelevant records. For this analysis, we are interested in fatalities, injuries, property damage and crop damage. We'll first eliminate any records for which  entries in all the fields FATALITIES, INJURIES, PROPDMG, CROPDMG = 0. We then remove unused levels.
+
+```{r}
+     stormData = filter(stormData, FATALITIES != 0 | INJURIES != 0 | PROPDMG != 0 | CROPDMG != 0)
+     stormData$EVTYPE = factor(stormData$EVTYPE)
+```
+This reduced the number of records in the data set by about 2/3 to `r nrow(stormData)` rows. The number of unique events in this file is `r length(levels(stormData$EVTYPE))`. These events were exported to csv, imported to excel and then mapped to the 48 standard storm data events. *This mapping was done using personal judgement.* The results are dependent upon the accuracy or reasonableness of the mapping. The results were stored in the file, *events.csv*.This is a two column data frame where the first column are all the unique storm events from the stormData file, and the second column are the standard events as described in the Storm Data documentation.  
+  
+First, we read the *events.csv* file, then relevel the EVTYPE factors using the *newFactors* column. We test the first column--which contains the original factors--to ensure it matches the EVTYPE levels. If it doesn't, that would mean the factors are out of sequence.
+
+```{r}
+     eventFactors = read.csv("events.csv") 
+     identical(levels(stormData$EVTYPE), levels(eventFactors$OriginalFactors))
+     levels(stormData$EVTYPE) = eventFactors$NewFactors
+```
+The number of levels in stormData$EVTYPE has been reduced from 751 to `r length(levels(stormData$EVTYPE))`.
+  
+#### Creating the correct damage numbers
+For Property and Crop damage, there are two columns of data, each. The first, a numeric, (PROPDMG, CROPDMG) gives the decimal portion of the dollar value of the damage. The second, a factor, (PROPDMGEXP, CROPDMGEXP) gives the multiplier - thousands (K), millions (M), billions (B) or 1 (""). 
+  
+We will relevel the factors so that they are 1, 1000, 1000000, 1000000000, and can be multiplied against the decimal portions to get the complete damage.  
+
+The original factors are shown below:
+```{r}
+levels(stormData$PROPDMGEXP)
+levels(stormData$CROPDMGEXP)
+```
+Any factor which is not blank, K, M or B will be turned into zero. Analysis shows there are only 4 rows in CROPDMGEXP which have this characteristic--which is a very small percentage of the total number of records. Refactoring, and creating new property and crop damage variables:
+```{r}
+levels(stormData$PROPDMGEXP) = c("1","0","0","0","0","0","0","0","0","0","0","0","0","1000000000","0","0","1000","1000000","1000000")
+levels(stormData$CROPDMGEXP) = c("1","0","0","0","1000000000","1000","1000","1000000","1000000")
+stormData = stormData %>% 
+          mutate(PDAMAGE = PROPDMG*as.numeric(as.character(PROPDMGEXP)), CDAMAGE = CROPDMG*as.numeric(as.character(CROPDMGEXP)))
+```
+#### Creating data frames for results analysis
+At this point, the raw data has been cleaned up. Now, we'd like to create data tables that will be appropriate for answering questions regarding harm to health and economic damage. For these tables, we summarize data by EVTYPE and take the top 10 (worst) events based on the sum of injuries + fatalities (for health), and property + crop damage (for economic). 
+
+```{r}
+     healthConseq = stormData %>%
+                         group_by(EVTYPE) %>% 
+                         summarize(FATALITIES = sum(FATALITIES), INJURIES = sum(INJURIES)) %>% 
+                         arrange(desc(FATALITIES + INJURIES)) %>% 
+                         slice(1:10) %>% 
+                         gather(HDAMAGE, NUMBER, c(FATALITIES, INJURIES))
+     econConseq = stormData %>%
+                         group_by(EVTYPE) %>%
+                         summarize(PROPDAMAGE = sum(PDAMAGE)/1000000000, CROPDAMAGE = sum(CDAMAGE)/1000000000) %>%
+                         arrange(desc(PROPDAMAGE + CROPDAMAGE)) %>% 
+                         slice(1:10) %>%
+                         gather(DAMAGE, COST, c(PROPDAMAGE, CROPDAMAGE))
+     totConseq = stormData %>%
+                         group_by(EVTYPE) %>%
+                         summarize(HLTHDAMAGE = sum(FATALITIES) + sum(INJURIES), ECONDAMAGE = log10(sum(PDAMAGE) + sum(CDAMAGE)))
+```
+
+##Results 
+#### Events with the Greatest Health Consequences
+The top ten events having the greatest health consequences are plotted below. In this case, "worst" is defined as resulting in either injury or death. This analysis suggests that tornados have the worst cost in deaths and injuries.
+```{r, fig.height=4}
+     g = ggplot(healthConseq, aes(EVTYPE, NUMBER))
+     g + geom_bar(stat="identity", aes(fill=HDAMAGE)) + ggtitle("Events with the Greatest Health Consequences") + theme_gray() + theme(axis.text.x = element_text(angle = 90, hjust = 1))  + scale_fill_brewer(palette="Set1") + labs(x="Event Type", y="Fatalities or Injuries")  + scale_fill_discrete(name="", labels=c("Fatalities", "Injuries"))
+```
+  
+#### Events with the Greatest Economic Consequences
+The top ten events having the greatest economic consequences are plotted below. In this case, "worst" is defined as resulting in either injury or death. This analysis sugggests that floods have the greatest economic damage.
+```{r, fig.height=4}
+     g = ggplot(econConseq, aes(EVTYPE, COST))
+     g + geom_bar(stat="identity", aes(fill=DAMAGE)) + scale_fill_brewer(palette="Set1") + ggtitle("Events with the Greatest Economic Consequences") + theme_gray() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + xlab("Event Type") + ylab("Cost (billions)")  + scale_y_continuous(labels = dollar) + scale_fill_discrete(name="", labels=c("Crop Damage", "Property Damage"))
+```
+
+#### Relationship between Health and Economic Damages
+The analysis begs the question as to whether there is a relationship between health and economic damages--whether events that cause severe economic damage, also have a correspondingly high impact on health. Shown below is a plot of health consequences versus economic damage.
+```{r, fig.height=4}
+# Find interesting subset to create linear regression on
+     hlthEcon = subset(totConseq, HLTHDAMAGE > 100 & HLTHDAMAGE < 5000)
+     
+     h = ggplot(totConseq, aes(HLTHDAMAGE, ECONDAMAGE))
+     h + geom_point(size=2, shape=21, fill="skyblue3") + coord_cartesian(xlim=c(0,5000)) + labs(title="Relationship between Health and Economic Damages", x="Health Effects (Injuries/Fatalities)", y="Economic Damage (billions)") + scale_y_continuous(labels = dollar) + geom_smooth(data=hlthEcon, aes(HLTHDAMAGE, ECONDAMAGE), method='lm')
+```
+  
+It appears there is a class of events that have economic consequences that have almost no effect on human health. This makes sense, as events like drought and sleet are not typically associated with death and injuries. Some are shown in the table below. 
+  
+```{r}
+     smallTot = totConseq %>%
+               filter(HLTHDAMAGE < 50) %>% 
+               arrange(desc(ECONDAMAGE))
+     head(smallTot[1:10,1:3])    
+```
+  
+There also appears to be another class of events in which the econcomic and health consequences are related--as expressed by the regression line. This also makes sense, as events like hurricanes and tornados have effects on humans and property. Some are shown below.
+  
+```{r}
+     lrgTot = totConseq %>%
+               filter(HLTHDAMAGE > 50) %>% 
+               arrange(desc(HLTHDAMAGE))
+     head(lrgTot[1:10,1:3])    
+```
+
